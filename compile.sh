@@ -1,3 +1,4 @@
+mkdir bc
 cd assign2-tests
 cfiles=$(ls .)
 for file in $cfiles; do
