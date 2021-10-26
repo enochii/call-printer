@@ -37,6 +37,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <stack>
 
 using namespace std;
 using namespace llvm;
@@ -77,58 +78,79 @@ struct FuncPtrPass : public ModulePass {
       M.dump();
       errs()<<"------------------------------\n";
     }
-    walkThrough(M);
+    walkThroughModule(M);
+    dumpCallsite();
     return false;
   }
 
+typedef set<const Function*> FuncPtrSet;
+
 private:
-  map<const Value *, set<StringRef>> funcPtrMap;
-  void walkThrough(const Module & M) {
+  map<const Value *, FuncPtrSet> funcPtrMap;
+  map<unsigned, FuncPtrSet> cs2callee; // call site -> callee(function or function pointer)
+  stack<Instruction*> callStack;
+
+  void walkThroughModule(const Module & M) {
+    const Function *entry = NULL;
+    // for(auto const &f : M) {
+    //   if(f.isDeclaration() || f.isIntrinsic())
+    //     continue;
+    //   // llvm::errs() << f.getName();
+    //   walkThroughFunc(*entry);
+    // }
     for(auto const &f : M) {
-      if(f.isDeclaration())
-        continue;
-      for(const_inst_iterator it = inst_begin(f); it != inst_end(f); it++) {
+      // llvm::errs() << f.getName() << "\n";
+      if(f.isDSOLocal())
+        entry = &f;
+    }
+    // TODO: we currently assume the last user-defined function is the "entry"
+    assert(entry != NULL && "can not find entry!");
+    llvm::errs() << "entry: " << entry->getName() << "\n";
+    walkThroughFunc(*entry);
+  }
+
+  void walkThroughFunc(const Function& f) {
+    for(const_inst_iterator it = inst_begin(f); it != inst_end(f); it++) {
         auto inst = &*it.getInstructionIterator();
         resolvePtrForInstruction(inst);
       }
-    }
   }
 
   void resolvePtrForInstruction(const Instruction *inst) {
     switch (inst->getOpcode())
     {
-    case Instruction::Store: {
-      
-      break;
-    }
-    case Instruction::Call:
-    case Instruction::Invoke: {
-      ImmutableCallSite cs(inst);
-      assert(cs && "something wrong with call inst?");
-      resolvePtrForCall(cs);
-      break;
-    }
-    case Instruction::PHI: {
-      const PHINode * phiInst = cast<PHINode>(inst);
-      for(unsigned i=0; i<phiInst->getNumIncomingValues(); i++) {
-        auto iv = phiInst->getIncomingValue(i);
-        // iv->dump();
-        if(iv->getType()->isPointerTy()) {
-          if(Function *f = dyn_cast<Function>(iv))
-            funcPtrMap[phiInst].insert(f->getName());
-          else if(funcPtrMap.find(iv) != funcPtrMap.end()) {
-            // llvm::errs() << "another pointer in phi node";
-            for(auto &fname: funcPtrMap[iv]) 
-              llvm::errs() << fname, funcPtrMap[phiInst].insert(fname);
+      case Instruction::Store: {
+        
+        break;
+      }
+      case Instruction::Call:
+      case Instruction::Invoke: {
+        ImmutableCallSite cs(inst);
+        assert(cs && "something wrong with call inst?");
+        resolvePtrForCall(cs);
+        break;
+      }
+      case Instruction::PHI: {
+        const PHINode * phiInst = cast<PHINode>(inst);
+        for(unsigned i=0; i<phiInst->getNumIncomingValues(); i++) {
+          auto iv = phiInst->getIncomingValue(i);
+          // iv->dump();
+          if(iv->getType()->isPointerTy()) {
+            if(Function *f = dyn_cast<Function>(iv))
+              funcPtrMap[phiInst].insert(f);
+            else if(funcPtrMap.find(iv) != funcPtrMap.end()) {
+              // llvm::errs() << "another pointer in phi node";
+              for(auto &f: funcPtrMap[iv]) 
+                funcPtrMap[phiInst].insert(f);
+            }
           }
         }
+        break;
       }
-      break;
-    }
-    
-    default:
-      // inst->dump();
-      break;
+      
+      default:
+        // inst->dump();
+        break;
     }
   }
 
@@ -140,17 +162,41 @@ private:
         // llvm::outs() << "external fucntion call :";
         // f->dump();
       } else {
-        llvm::errs() << line << " : " << f->getName() << "\n";
+        cs2callee[line].insert(f); // TODO: we can do just once!
+        doCall(f, cs);
       }
     } else {
       const Value *funcPtr = cs.getCalledValue();
       // funcPtr->dump();
+      for(auto &f:funcPtrMap[funcPtr]) {
+        cs2callee[line].insert(f);
+        doCall(f, cs);
+      }
+    }
+  }
+
+  void doCall(const Function *f, ImmutableCallSite cs) {
+    llvm::errs() << "doCall: " << f->getName() << "\n";
+    auto argIt = cs.arg_begin();
+    auto parIt = f->arg_begin();
+    while(argIt != cs.arg_end() && parIt != f->arg_end()) {
+      auto parameter = &*parIt;
+      const Value* actual = *argIt; // ?
+      if(parameter->getType()->isPointerTy() && actual->getType()->isPointerTy())
+        funcPtrMap[parameter] = funcPtrMap[actual]; // strong update
+      ++argIt; ++parIt;
+    }
+    walkThroughFunc(*f);
+  }
+
+  void dumpCallsite() {
+    for(const auto& kv:cs2callee) {
       string res;
-      for(auto &fname:funcPtrMap[funcPtr]) {
-        res += fname.str() + ", ";
+      for(auto &f:kv.second) {
+        res += f->getName().str() + ", ";
       }
       assert(res.size() > 0 && "no target method!");
-      llvm::errs() << line << " : " << res.substr(0, res.size()-2) << "\n";
+      llvm::errs() << kv.first << " : " << res.substr(0, res.size()-2) << "\n";
     }
   }
 };

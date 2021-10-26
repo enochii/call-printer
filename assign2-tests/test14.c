@@ -35,6 +35,6 @@ int moo(char x, int op1, int op2) {
 }
 
 
-// 24 : foo  
+// 24 : foo  (flow-sensitive!)
 // 31 : clever,foo
 // 32 : plus
