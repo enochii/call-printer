@@ -88,7 +88,7 @@ typedef set<const Function*> FuncPtrSet;
 private:
   map<const Value *, FuncPtrSet> funcPtrMap;
   map<unsigned, FuncPtrSet> cs2callee; // call site -> callee(function or function pointer)
-  stack<Instruction*> callStack;
+  stack<const Instruction*> callStack;
 
   void walkThroughModule(const Module & M) {
     const Function *entry = NULL;
@@ -105,7 +105,7 @@ private:
     }
     // TODO: we currently assume the last user-defined function is the "entry"
     assert(entry != NULL && "can not find entry!");
-    llvm::errs() << "entry: " << entry->getName() << "\n";
+    llvm::outs() << "entry: " << entry->getName() << "\n";
     walkThroughFunc(*entry);
   }
 
@@ -130,6 +130,22 @@ private:
         resolvePtrForCall(cs);
         break;
       }
+      case Instruction::Ret: {
+        /// the return stmt is always at the end of function body
+        if(inst->getNumOperands() > 0) {
+          const Value* ret = inst->getOperand(0);
+          if(ret->getType()->isPointerTy()) {
+            auto ptrSet = lookupValue(ret);
+            const Instruction *retInst = callStack.top();
+            // retInst->dump(); llvm::outs() << ptrSet.size() << "\n";
+            // merge multiple return result! -> DO NOT strong update
+            mergePtrSet(funcPtrMap[retInst], ptrSet);
+          }
+        }
+        /// actually we can just keep the call stack un-poped...
+        callStack.pop();
+        break;
+      }
       case Instruction::PHI: {
         const PHINode * phiInst = cast<PHINode>(inst);
         for(unsigned i=0; i<phiInst->getNumIncomingValues(); i++) {
@@ -149,7 +165,9 @@ private:
       }
       
       default:
-        // inst->dump();
+        if(inst->getType()->isPointerTy()) {
+          inst->dump();
+        }
         break;
     }
   }
@@ -176,17 +194,40 @@ private:
   }
 
   void doCall(const Function *f, ImmutableCallSite cs) {
-    llvm::errs() << "doCall: " << f->getName() << "\n";
+    // llvm::outs() << "doCall: " << f->getName() << "\n";
     auto argIt = cs.arg_begin();
     auto parIt = f->arg_begin();
     while(argIt != cs.arg_end() && parIt != f->arg_end()) {
-      auto parameter = &*parIt;
+      const Argument* parameter = &*parIt;
       const Value* actual = *argIt; // ?
-      if(parameter->getType()->isPointerTy() && actual->getType()->isPointerTy())
-        funcPtrMap[parameter] = funcPtrMap[actual]; // strong update
+      if(parameter->getType()->isPointerTy() && actual->getType()->isPointerTy()) {
+        // llvm::outs() << "actual :\n";
+        // dumpPtrs(funcPtrMap[actual]);
+        funcPtrMap[parameter] = lookupValue(actual); // strong update
+      }
       ++argIt; ++parIt;
     }
+    callStack.push(cs.getInstruction());
     walkThroughFunc(*f);
+  }
+
+  FuncPtrSet lookupValue(const Value * v) {
+    if(const Function *f = dyn_cast<Function>(v)) {
+      FuncPtrSet res;
+      res.insert(f);
+      return res;
+    }
+    else if(funcPtrMap.find(v) != funcPtrMap.end()) {
+      // llvm::outs() << "lookup: \n";
+      // dumpPtrs(funcPtrMap[v]);
+      return funcPtrMap[v];
+    }
+    assert(0 && "lookupValue failed");
+  }
+
+  void mergePtrSet(FuncPtrSet &dst, FuncPtrSet &src) {
+    for(const auto v:src) 
+      dst.insert(v);
   }
 
   void dumpCallsite() {
@@ -199,8 +240,13 @@ private:
       llvm::errs() << kv.first << " : " << res.substr(0, res.size()-2) << "\n";
     }
   }
+ 
+  void dumpPtrs(FuncPtrSet &ptrSet) {
+    for(auto &value:ptrSet) {
+      value->dump();
+    }
+  }
 };
-
 
 char FuncPtrPass::ID = 0;
 static RegisterPass<FuncPtrPass> X("funcptrpass", "Print function call instruction");

@@ -27,7 +27,7 @@ int moo(char x, int op1, int op2) {
     {
         goo_ptr=clever;
     }
-
+    // goo_ptr -> foo clever | s_fptr -> minus plus
     t_fptr = goo_ptr(op1, op2, s_fptr, a_fptr); 
     t_fptr(op1, op2);
     
