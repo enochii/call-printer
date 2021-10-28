@@ -96,7 +96,7 @@ private:
     //   if(f.isDeclaration() || f.isIntrinsic())
     //     continue;
     //   // llvm::errs() << f.getName();
-    //   walkThroughFunc(*entry);
+    //   walkThroughFunc(f);
     // }
     for(auto const &f : M) {
       // llvm::errs() << f.getName() << "\n";
@@ -134,7 +134,7 @@ private:
         /// the return stmt is always at the end of function body
         if(inst->getNumOperands() > 0) {
           const Value* ret = inst->getOperand(0);
-          if(ret->getType()->isPointerTy()) {
+          if(ret->getType()->isPointerTy() && funcPtrMap.count(ret)) {
             auto ptrSet = lookupValue(ret);
             const Instruction *retInst = callStack.top();
             // retInst->dump(); llvm::outs() << ptrSet.size() << "\n";
@@ -174,12 +174,12 @@ private:
 
   void resolvePtrForCall(ImmutableCallSite cs) {
     const Instruction *inst = cs.getInstruction();
-    unsigned line = inst->getDebugLoc().getLine();
     if(const Function* f = cs.getCalledFunction()) {
       if(f->isDeclaration() || f->isIntrinsic()) { // external function
         // llvm::outs() << "external fucntion call :";
         // f->dump();
       } else {
+        unsigned line = inst->getDebugLoc().getLine();
         cs2callee[line].insert(f); // TODO: we can do just once!
         doCall(f, cs);
       }
@@ -187,6 +187,7 @@ private:
       const Value *funcPtr = cs.getCalledValue();
       // funcPtr->dump();
       for(auto &f:funcPtrMap[funcPtr]) {
+        unsigned line = inst->getDebugLoc().getLine();
         cs2callee[line].insert(f);
         doCall(f, cs);
       }
@@ -203,7 +204,8 @@ private:
       if(parameter->getType()->isPointerTy() && actual->getType()->isPointerTy()) {
         // llvm::outs() << "actual :\n";
         // dumpPtrs(funcPtrMap[actual]);
-        funcPtrMap[parameter] = lookupValue(actual); // strong update
+        if(funcPtrMap.count(actual))
+          funcPtrMap[parameter] = lookupValue(actual); // strong update
       }
       ++argIt; ++parIt;
     }
@@ -212,8 +214,8 @@ private:
   }
 
   FuncPtrSet lookupValue(const Value * v) {
+    FuncPtrSet res;
     if(const Function *f = dyn_cast<Function>(v)) {
-      FuncPtrSet res;
       res.insert(f);
       return res;
     }
@@ -222,7 +224,8 @@ private:
       // dumpPtrs(funcPtrMap[v]);
       return funcPtrMap[v];
     }
-    assert(0 && "lookupValue failed");
+    return res; // empty
+    // assert(0 && "lookupValue failed");
   }
 
   void mergePtrSet(FuncPtrSet &dst, FuncPtrSet &src) {
