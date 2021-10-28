@@ -63,6 +63,9 @@ char EnableFunctionOptPass::ID=0;
 cl::opt<bool> DumpModuleInfo("dump-module",
                                  cl::desc("Dump Module info into stderr"),
                                  cl::init(false), cl::Hidden);
+cl::opt<bool> DumpDebugInfo("debug-info",
+                                 cl::desc("Dump debug info into out"),
+                                 cl::init(false), cl::Hidden);
 ///!TODO TO BE COMPLETED BY YOU FOR ASSIGNMENT 2
 ///Updated 11/10/2017 by fargo: make all functions
 ///processed by mem2reg before this pass.
@@ -92,24 +95,24 @@ private:
 
   void walkThroughModule(const Module & M) {
     const Function *entry = NULL;
-    // for(auto const &f : M) {
-    //   if(f.isDeclaration() || f.isIntrinsic())
-    //     continue;
-    //   // llvm::errs() << f.getName();
-    //   walkThroughFunc(f);
-    // }
     for(auto const &f : M) {
-      // llvm::errs() << f.getName() << "\n";
-      if(f.isDSOLocal())
-        entry = &f;
+      if(!f.isDSOLocal())
+        continue;
+      walkThroughFunc(f);
     }
-    // TODO: we currently assume the last user-defined function is the "entry"
-    assert(entry != NULL && "can not find entry!");
-    llvm::outs() << "entry: " << entry->getName() << "\n";
-    walkThroughFunc(*entry);
+    // for(auto const &f : M) {
+    //   // llvm::errs() << f.getName() << "\n";
+    //   if(f.isDSOLocal())
+    //     entry = &f;
+    // }
+    // // TODO: we currently assume the last user-defined function is the "entry"
+    // assert(entry != NULL && "can not find entry!");
+    // llvm::outs() << "entry: " << entry->getName() << "\n";
+    // walkThroughFunc(*entry);
   }
 
   void walkThroughFunc(const Function& f) {
+    if(DumpDebugInfo) llvm::outs() << f.getName() << "\n";
     for(const_inst_iterator it = inst_begin(f); it != inst_end(f); it++) {
         auto inst = &*it.getInstructionIterator();
         resolvePtrForInstruction(inst);
@@ -134,16 +137,19 @@ private:
         /// the return stmt is always at the end of function body
         if(inst->getNumOperands() > 0) {
           const Value* ret = inst->getOperand(0);
-          if(ret->getType()->isPointerTy() && funcPtrMap.count(ret)) {
+          if(!ret->getType()->isPointerTy())
+            break;
+          if(DumpDebugInfo) ret->dump();
+          if(funcPtrMap.count(ret)) {
             auto ptrSet = lookupValue(ret);
             const Instruction *retInst = callStack.top();
-            // retInst->dump(); llvm::outs() << ptrSet.size() << "\n";
+            retInst->dump(); llvm::outs() << ptrSet.size() << "\n";
             // merge multiple return result! -> DO NOT strong update
             mergePtrSet(funcPtrMap[retInst], ptrSet);
           }
         }
         /// actually we can just keep the call stack un-poped...
-        callStack.pop();
+        if(!callStack.empty()) callStack.pop();
         break;
       }
       case Instruction::PHI: {
@@ -174,12 +180,13 @@ private:
 
   void resolvePtrForCall(ImmutableCallSite cs) {
     const Instruction *inst = cs.getInstruction();
+    unsigned line = inst->getDebugLoc().getLine();
     if(const Function* f = cs.getCalledFunction()) {
       if(f->isDeclaration() || f->isIntrinsic()) { // external function
         // llvm::outs() << "external fucntion call :";
         // f->dump();
+        if(f->isDSOLocal()) cs2callee[line].insert(f);
       } else {
-        unsigned line = inst->getDebugLoc().getLine();
         cs2callee[line].insert(f); // TODO: we can do just once!
         doCall(f, cs);
       }
@@ -187,7 +194,6 @@ private:
       const Value *funcPtr = cs.getCalledValue();
       // funcPtr->dump();
       for(auto &f:funcPtrMap[funcPtr]) {
-        unsigned line = inst->getDebugLoc().getLine();
         cs2callee[line].insert(f);
         doCall(f, cs);
       }
@@ -195,17 +201,18 @@ private:
   }
 
   void doCall(const Function *f, ImmutableCallSite cs) {
-    // llvm::outs() << "doCall: " << f->getName() << "\n";
+    if(DumpDebugInfo) llvm::outs() << "doCall: " << f->getName() << "\n";
     auto argIt = cs.arg_begin();
     auto parIt = f->arg_begin();
     while(argIt != cs.arg_end() && parIt != f->arg_end()) {
       const Argument* parameter = &*parIt;
       const Value* actual = *argIt; // ?
       if(parameter->getType()->isPointerTy() && actual->getType()->isPointerTy()) {
-        // llvm::outs() << "actual :\n";
-        // dumpPtrs(funcPtrMap[actual]);
-        if(funcPtrMap.count(actual))
-          funcPtrMap[parameter] = lookupValue(actual); // strong update
+        funcPtrMap[parameter] = lookupValue(actual); // strong update
+        if(DumpDebugInfo) {
+          llvm::outs() << "actual :\n";
+          dumpPtrs(funcPtrMap[actual]);
+        }
       }
       ++argIt; ++parIt;
     }
