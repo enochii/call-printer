@@ -66,6 +66,10 @@ cl::opt<bool> DumpModuleInfo("dump-module",
 cl::opt<bool> DumpDebugInfo("debug-info",
                                  cl::desc("Dump debug info into out"),
                                  cl::init(false), cl::Hidden);
+cl::opt<bool> DumpTrace("trace",
+                                 cl::desc("Dump trace into err"),
+                                 cl::init(false), cl::Hidden);
+
 ///!TODO TO BE COMPLETED BY YOU FOR ASSIGNMENT 2
 ///Updated 11/10/2017 by fargo: make all functions
 ///processed by mem2reg before this pass.
@@ -91,17 +95,23 @@ typedef set<const Function*> FuncPtrSet;
 struct State {
   map<const Value *, FuncPtrSet> funcPtrMap;
   const Instruction * PC;
+  stack<int> branchLabels;
+
   State(map<const Value *, FuncPtrSet> &funcPtrMap,
-       const Instruction * PC):funcPtrMap(funcPtrMap), PC(PC) { }
+       const Instruction * PC, stack<int>&labels)
+        :funcPtrMap(funcPtrMap), PC(PC), branchLabels(labels) { }
 };
 
 
 private:
-  map<const Value *, FuncPtrSet> funcPtrMap;
   map<unsigned, FuncPtrSet> cs2callee; // call site -> callee(function or function pointer)
+
+  stack<int> branchLabels;
+  map<const Value *, FuncPtrSet> funcPtrMap;
+
   stack<const Instruction*> callStack;
   stack<State> branchStack;
-  int branchLabel = 0;
+  // int branchLabel = 0;
 
   void walkThroughModule(const Module & M) {
     const Function *entry = NULL;
@@ -110,42 +120,34 @@ private:
         continue;
       walkThroughFunc(f);
     }
-    // for(auto const &f : M) {
-    //   // llvm::errs() << f.getName() << "\n";
-    //   if(f.isDSOLocal())
-    //     entry = &f;
-    // }
-    // // TODO: we currently assume the last user-defined function is the "entry"
-    // assert(entry != NULL && "can not find entry!");
-    // llvm::outs() << "entry: " << entry->getName() << "\n";
-    // walkThroughFunc(*entry);
   }
 
   void walkThroughFunc(const Function& f) {
     const int sz = branchStack.size();
+    if(inst_begin(f) == inst_end(f)) return;
     auto endInst = &*--inst_end(f);
     auto curInst = &*inst_begin(f);
     while(curInst != endInst) {
-        // curInst->dump();
+        if(DumpTrace)curInst->dump();
         if(resolvePtrForInstruction(curInst)) {
           // branch with or without condition
           assert(curInst->getOpcode() == Instruction::Br);
           const BranchInst* brInst = cast<BranchInst>(curInst);
-          // curInst->dump();
           curInst = &brInst->getSuccessor(0)->front();
-          // curInst->dump();
         } else 
           curInst = curInst->getNextNode();
     }
     resolvePtrForInstruction(endInst);//....
     auto current = funcPtrMap;
     while (branchStack.size() > sz) {
-      branchLabel = 1;
+      setBranchLabel(1);
       // change state
       auto top = branchStack.top(); branchStack.pop();
       funcPtrMap = top.funcPtrMap;
+      branchLabels = top.branchLabels;
       auto inst = top.PC;
       while(inst != endInst) {
+        if(DumpTrace)inst->dump();
         bool jump = resolvePtrForInstruction(inst);
         if(jump) {
           inst = &inst->getSuccessor(0)->front();
@@ -155,6 +157,7 @@ private:
       }
       resolvePtrForInstruction(endInst);//....
       mergePtrMap(current, funcPtrMap);
+      setBranchLabel(0);
     }
     funcPtrMap = current;
   }
@@ -163,10 +166,6 @@ private:
   bool resolvePtrForInstruction(const Instruction *inst) {
     switch (inst->getOpcode())
     {
-      case Instruction::Store: {
-        
-        break;
-      }
       case Instruction::Call:
       case Instruction::Invoke: {
         ImmutableCallSite cs(inst);
@@ -196,9 +195,22 @@ private:
       }
       case Instruction::PHI: {
         const PHINode * phiInst = cast<PHINode>(inst);
+        if(branchLabels.empty()) {
+          llvm::outs() << "Empty leabl stack!\n";
+          break;
+        }
+        assert(!branchLabels.empty() && "branch label stack is empty!");
+        int branchLabel = branchLabels.top();
+        if(phiInst->getNextNode() && 
+              phiInst->getNextNode()->getOpcode()!=Instruction::PHI)
+          branchLabels.pop();
         for(unsigned i=0; i<phiInst->getNumIncomingValues(); i++) {
           if(i != branchLabel) continue;
           auto iv = phiInst->getIncomingValue(i);
+          if(DumpDebugInfo) {
+            llvm::outs() << "phi: " << phiInst->getName() << "<-" 
+                         << iv->getName() << "\n";
+          }
           // iv->dump();
           if(iv->getType()->isPointerTy()) {
             if(Function *f = dyn_cast<Function>(iv))
@@ -215,10 +227,35 @@ private:
       case Instruction::Br: {
         const BranchInst *brInst = cast<BranchInst>(inst);
         if(brInst->getNumSuccessors() == 2) {
+          const Value* cond = brInst->getCondition();
+          if(const CmpInst* bop=dyn_cast<CmpInst>(cond)) {
+            // TODO: complete the logic
+            if(isa<ConstantInt>(bop->getOperand(0)) && 
+                isa<ConstantInt>(bop->getOperand(1))) {
+                  auto a = dyn_cast<ConstantInt>(bop->getOperand(0));
+                  auto b = dyn_cast<ConstantInt>(bop->getOperand(1));
+                  // only handle ">" for test19
+                  if(a->getLimitedValue() > b->getLimitedValue()) {
+                    branchLabels.push(0); 
+                    return true;
+                  }
+                }
+          }
+
+          auto elseBranchLabels = branchLabels;
+          elseBranchLabels.push(1);
+          branchLabels.push(0);
           const Instruction* elseEntry = &brInst->getSuccessor(1)->front();
-          branchStack.emplace(funcPtrMap, elseEntry);
+          branchStack.emplace(funcPtrMap, elseEntry, elseBranchLabels);
           if(!callStack.empty()) 
             callStack.push(callStack.top()); // then we can pop twice
+        } else {
+          assert(brInst->getNumSuccessors() == 1);
+          if(brInst->getSuccessor(0)->getName().startswith("for.cond")
+            && brInst->getParent()->getName().startswith("for.inc")) {
+            llvm::outs() << "for???\n";
+            return false;
+          }
         }
         return true; // jump 
       }
@@ -264,7 +301,8 @@ private:
       if(parameter->getType()->isPointerTy() && actual->getType()->isPointerTy()) {
         funcPtrMap[parameter] = lookupValue(actual); // strong update
         if(DumpDebugInfo) {
-          llvm::outs() << "actual: ";
+          llvm::outs() << "actual(";
+          llvm::outs() << actual->getName() << "): ";
           dumpPtrs(funcPtrMap[actual]);
         }
       }
@@ -315,6 +353,11 @@ private:
       llvm::outs() << value->getName() << " ";
     }
     llvm::outs() << "\n";
+  }
+
+  void setBranchLabel(int label) {
+    // branchLabel = label;
+    // llvm::errs() << "set label to " << label << "\n";
   }
 };
 
