@@ -88,10 +88,20 @@ struct FuncPtrPass : public ModulePass {
 
 typedef set<const Function*> FuncPtrSet;
 
+struct State {
+  map<const Value *, FuncPtrSet> funcPtrMap;
+  const Instruction * PC;
+  State(map<const Value *, FuncPtrSet> &funcPtrMap,
+       const Instruction * PC):funcPtrMap(funcPtrMap), PC(PC) { }
+};
+
+
 private:
   map<const Value *, FuncPtrSet> funcPtrMap;
   map<unsigned, FuncPtrSet> cs2callee; // call site -> callee(function or function pointer)
   stack<const Instruction*> callStack;
+  stack<State> branchStack;
+  int branchLabel = 0;
 
   void walkThroughModule(const Module & M) {
     const Function *entry = NULL;
@@ -112,14 +122,45 @@ private:
   }
 
   void walkThroughFunc(const Function& f) {
-    if(DumpDebugInfo) llvm::outs() << f.getName() << "\n";
-    for(const_inst_iterator it = inst_begin(f); it != inst_end(f); it++) {
-        auto inst = &*it.getInstructionIterator();
-        resolvePtrForInstruction(inst);
+    const int sz = branchStack.size();
+    auto endInst = &*--inst_end(f);
+    auto curInst = &*inst_begin(f);
+    while(curInst != endInst) {
+        // curInst->dump();
+        if(resolvePtrForInstruction(curInst)) {
+          // branch with or without condition
+          assert(curInst->getOpcode() == Instruction::Br);
+          const BranchInst* brInst = cast<BranchInst>(curInst);
+          // curInst->dump();
+          curInst = &brInst->getSuccessor(0)->front();
+          // curInst->dump();
+        } else 
+          curInst = curInst->getNextNode();
+    }
+    resolvePtrForInstruction(endInst);//....
+    auto current = funcPtrMap;
+    while (branchStack.size() > sz) {
+      branchLabel = 1;
+      // change state
+      auto top = branchStack.top(); branchStack.pop();
+      funcPtrMap = top.funcPtrMap;
+      auto inst = top.PC;
+      while(inst != endInst) {
+        bool jump = resolvePtrForInstruction(inst);
+        if(jump) {
+          inst = &inst->getSuccessor(0)->front();
+        } else {
+          inst = inst->getNextNode();
+        }
       }
+      resolvePtrForInstruction(endInst);//....
+      mergePtrMap(current, funcPtrMap);
+    }
+    funcPtrMap = current;
   }
 
-  void resolvePtrForInstruction(const Instruction *inst) {
+  /// return value indicates that, should we jump?
+  bool resolvePtrForInstruction(const Instruction *inst) {
     switch (inst->getOpcode())
     {
       case Instruction::Store: {
@@ -143,7 +184,8 @@ private:
           if(funcPtrMap.count(ret)) {
             auto ptrSet = lookupValue(ret);
             const Instruction *retInst = callStack.top();
-            retInst->dump(); llvm::outs() << ptrSet.size() << "\n";
+            // retInst->dump();
+            // dumpPtrs(ptrSet);
             // merge multiple return result! -> DO NOT strong update
             mergePtrSet(funcPtrMap[retInst], ptrSet);
           }
@@ -155,6 +197,7 @@ private:
       case Instruction::PHI: {
         const PHINode * phiInst = cast<PHINode>(inst);
         for(unsigned i=0; i<phiInst->getNumIncomingValues(); i++) {
+          if(i != branchLabel) continue;
           auto iv = phiInst->getIncomingValue(i);
           // iv->dump();
           if(iv->getType()->isPointerTy()) {
@@ -169,6 +212,16 @@ private:
         }
         break;
       }
+      case Instruction::Br: {
+        const BranchInst *brInst = cast<BranchInst>(inst);
+        if(brInst->getNumSuccessors() == 2) {
+          const Instruction* elseEntry = &brInst->getSuccessor(1)->front();
+          branchStack.emplace(funcPtrMap, elseEntry);
+          if(!callStack.empty()) 
+            callStack.push(callStack.top()); // then we can pop twice
+        }
+        return true; // jump 
+      }
       
       default:
         if(inst->getType()->isPointerTy()) {
@@ -176,6 +229,7 @@ private:
         }
         break;
     }
+    return false;
   }
 
   void resolvePtrForCall(ImmutableCallSite cs) {
@@ -210,7 +264,7 @@ private:
       if(parameter->getType()->isPointerTy() && actual->getType()->isPointerTy()) {
         funcPtrMap[parameter] = lookupValue(actual); // strong update
         if(DumpDebugInfo) {
-          llvm::outs() << "actual :\n";
+          llvm::outs() << "actual: ";
           dumpPtrs(funcPtrMap[actual]);
         }
       }
@@ -235,6 +289,11 @@ private:
     // assert(0 && "lookupValue failed");
   }
 
+  void mergePtrMap(map<const Value *, FuncPtrSet> dst, map<const Value *, FuncPtrSet> src) {
+    for(auto &kv:src) 
+      mergePtrSet(dst[kv.first], kv.second);
+  }
+
   void mergePtrSet(FuncPtrSet &dst, FuncPtrSet &src) {
     for(const auto v:src) 
       dst.insert(v);
@@ -252,9 +311,10 @@ private:
   }
  
   void dumpPtrs(FuncPtrSet &ptrSet) {
-    for(auto &value:ptrSet) {
-      value->dump();
+    for(auto value:ptrSet) {
+      llvm::outs() << value->getName() << " ";
     }
+    llvm::outs() << "\n";
   }
 };
 
