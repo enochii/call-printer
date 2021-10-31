@@ -129,18 +129,19 @@ private:
     auto curInst = &*inst_begin(f);
     while(curInst != endInst) {
         if(DumpTrace)curInst->dump();
-        if(resolvePtrForInstruction(curInst)) {
+        curInst = resolvePtrForInstruction(curInst);
+        // if(resolvePtrForInstruction(curInst)) {
           // branch with or without condition
-          assert(curInst->getOpcode() == Instruction::Br);
-          const BranchInst* brInst = cast<BranchInst>(curInst);
-          curInst = &brInst->getSuccessor(0)->front();
-        } else 
-          curInst = curInst->getNextNode();
+        //   assert(curInst->getOpcode() == Instruction::Br);
+        //   const BranchInst* brInst = cast<BranchInst>(curInst);
+        //   curInst = &brInst->getSuccessor(0)->front();
+        // } else 
+        //   curInst = curInst->getNextNode();
     }
+    if(DumpDebugInfo)endInst->dump();
     resolvePtrForInstruction(endInst);//....
     auto current = funcPtrMap;
     while (branchStack.size() > sz) {
-      setBranchLabel(1);
       // change state
       auto top = branchStack.top(); branchStack.pop();
       funcPtrMap = top.funcPtrMap;
@@ -148,22 +149,22 @@ private:
       auto inst = top.PC;
       while(inst != endInst) {
         if(DumpTrace)inst->dump();
-        bool jump = resolvePtrForInstruction(inst);
-        if(jump) {
-          inst = &inst->getSuccessor(0)->front();
-        } else {
-          inst = inst->getNextNode();
-        }
+        inst = resolvePtrForInstruction(inst);
+        // if(jump) {
+        //   inst = &inst->getSuccessor(0)->front();
+        // } else {
+        //   inst = inst->getNextNode();
+        // }
       }
+      if(DumpDebugInfo)endInst->dump();
       resolvePtrForInstruction(endInst);//....
       mergePtrMap(current, funcPtrMap);
-      setBranchLabel(0);
     }
     funcPtrMap = current;
   }
 
   /// return value indicates that, should we jump?
-  bool resolvePtrForInstruction(const Instruction *inst) {
+  const Instruction* resolvePtrForInstruction(const Instruction *inst) {
     switch (inst->getOpcode())
     {
       case Instruction::Call:
@@ -179,7 +180,7 @@ private:
           const Value* ret = inst->getOperand(0);
           if(!ret->getType()->isPointerTy())
             break;
-          if(DumpDebugInfo) ret->dump();
+          if(DumpDebugInfo && ret) ret->dump();
           if(funcPtrMap.count(ret)) {
             auto ptrSet = lookupValue(ret);
             const Instruction *retInst = callStack.top();
@@ -237,7 +238,7 @@ private:
                   // only handle ">" for test19
                   if(a->getLimitedValue() > b->getLimitedValue()) {
                     branchLabels.push(0); 
-                    return true;
+                    return &brInst->getSuccessor(0)->front();
                   }
                 }
           }
@@ -253,11 +254,10 @@ private:
           assert(brInst->getNumSuccessors() == 1);
           if(brInst->getSuccessor(0)->getName().startswith("for.cond")
             && brInst->getParent()->getName().startswith("for.inc")) {
-            llvm::outs() << "for???\n";
-            return false;
+            return &brInst->getParent()->getNextNode()->front();
           }
         }
-        return true; // jump 
+        return &brInst->getSuccessor(0)->front(); // jump 
       }
       
       default:
@@ -266,7 +266,7 @@ private:
         }
         break;
     }
-    return false;
+    return inst->getNextNode();
   }
 
   void resolvePtrForCall(ImmutableCallSite cs) {
@@ -283,8 +283,11 @@ private:
       }
     } else {
       const Value *funcPtr = cs.getCalledValue();
-      // funcPtr->dump();
-      for(auto &f:funcPtrMap[funcPtr]) {
+      // DO NOT use reference, `pset` maybe changed in this set.
+      // and the loop will continue though the size is 1! -> seg fault
+      FuncPtrSet pset = funcPtrMap[funcPtr];
+      int sz = pset.size();
+      for(auto f:pset) {
         cs2callee[line].insert(f);
         doCall(f, cs);
       }
@@ -292,6 +295,7 @@ private:
   }
 
   void doCall(const Function *f, ImmutableCallSite cs) {
+    if(f == NULL) return;
     if(DumpDebugInfo) llvm::outs() << "doCall: " << f->getName() << "\n";
     auto argIt = cs.arg_begin();
     auto parIt = f->arg_begin();
@@ -319,8 +323,6 @@ private:
       return res;
     }
     else if(funcPtrMap.find(v) != funcPtrMap.end()) {
-      // llvm::outs() << "lookup: \n";
-      // dumpPtrs(funcPtrMap[v]);
       return funcPtrMap[v];
     }
     return res; // empty
@@ -353,11 +355,6 @@ private:
       llvm::outs() << value->getName() << " ";
     }
     llvm::outs() << "\n";
-  }
-
-  void setBranchLabel(int label) {
-    // branchLabel = label;
-    // llvm::errs() << "set label to " << label << "\n";
   }
 };
 
