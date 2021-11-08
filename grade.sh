@@ -5,12 +5,13 @@ cmake –DLLVM_DIR=/usr/local/llvm10d -DCMAKE_BUILD_TYPE=Debug ../.
 make
 cd ..
 
-source compile.sh # generate .bc
+source sh/compile.sh # generate .bc
 
 # grading
 ANALYSIS="build/llvmassignment"
 BC_DIR="bc"
 GROUND_TRUTH="ground-truth"
+FORMATER_HELPER="sh/format_helper.py"
 
 file_list=$(ls $BC_DIR)
 total=0
@@ -24,8 +25,8 @@ do_compare() {
     actual=$($ANALYSIS "$BC_DIR/$bc_file" 2>&1>/dev/null)
     expected=$(cat "$GROUND_TRUTH/${bc_file:0:6}$1")
     # format 
-    actual=$(python format_helper.py "$actual")
-    expected=$(python format_helper.py "$expected")
+    actual=$(python $FORMATER_HELPER "$actual")
+    expected=$(python $FORMATER_HELPER "$expected")
     
     [[ "$actual" == "$expected" ]] && is_match=1 || is_match=0
 }
