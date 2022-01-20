@@ -1,6 +1,6 @@
 ## Call Printer
 
-Assignment 2 of UCAS compiler homework.
+Assignment 2 of UCAS compiler homework, for more information you can refer to [this blog](https://enochii.github.io/posts/2021/11/08/Implement-a-call-printer.html).
 
 ### Requirement
 
